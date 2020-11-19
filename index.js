@@ -4,84 +4,130 @@ const bent     = require("bent");
 const {Client} = require("tplink-smarthome-api");
 
 
-const HA_TOKEN = ""
-const HOSTS    = ["192.168.1.10",
-                  "192.168.1.11",
-                  "192.168.1.12"];
-
-
-async function run()
+class KasaWatcher
 {
-    let home_assistant;
-    try
+    constructor(a_home_assistant_url,
+                a_home_assistant_token)
     {
-            home_assistant= bent("http://192.168.1.2/api/states/",
-                                 "POST",
-                                 // "json",
-                                 {Authorization: `Bearer ${HA_TOKEN}`},
-                                 [200, 201]);
-    }
-    catch (error)
-    {
-        console.log(error);
-    }
-    const kasa_client = new Client();
+        this._kasa_client    = new Client();
+        this._home_assistant = bent(`${a_home_assistant_url}/api/states/`,
+                                    "POST",
+                                    {Authorization: `Bearer ${a_home_assistant_token}`},
+                                    [200, 201]);
 
-    const switches = await Promise.all(HOSTS.map(
-        async (host) => {
-            return await kasa_client.getDevice({host: host})
-        }));
-
-    let initial_states = {"on":  0,
-                          "off": 0};
-    for (const light_switch of switches)
-    {
-        const info = await light_switch.getSysInfo();
-        const switch_state = info.relay_state ? "on" : "off";
-        initial_states[switch_state] += 1;
+        this._binary_sensors = {};
     }
 
-    let state = "off";
-    for (const initial_state in initial_states)
+    /**
+     * @param {string} a_default_initial_state
+     *     This is used as a tie breaker if equal number of switches have
+     *     opposite initial states. Must be "on" or "off".
+     */
+    async addSwitchGroup(a_binary_sensor_name,
+                         a_hosts,
+                         a_default_initial_state)
     {
-        if (initial_states[initial_state] > 1)
+        if (this._binary_sensors[a_binary_sensor_name] !== undefined)
         {
-            state = initial_state;
-            break;
+            throw new RangeError();
         }
-    }
-    try
-    {
-        await home_assistant("binary_sensor.study_lights", {state: state});
-    }
-    catch (error)
-    {
-        console.log(error);
+
+        const new_light_switches = await Promise.all(a_hosts.map(
+            async (host) => {
+                return await this._kasa_client.getDevice({host: host})
+            }));
+
+        let initial_states = {"on":  0,
+                              "off": 0};
+        await Promise.all(new_light_switches.map(
+            async (light_switch) => {
+                const switch_state = await this._requestSwitchState(light_switch);
+                initial_states[switch_state] += 1;
+            }));
+        const other_state = a_default_initial_state == "off" ? "on" : "off";
+        const new_state = (initial_states[a_default_initial_state] >= initial_states[other_state]
+                           ? a_default_initial_state : other_state);
+
+        this._binary_sensors[a_binary_sensor_name] = {light_switches: new_light_switches,
+                                                      state:          new_state};
+
+        await this._updateSensorState(a_binary_sensor_name, new_state);
     }
 
-    setInterval(
-        async() => {
-            for (const light_switch of switches)
+    async checkAllAndUpdate()
+    {
+        for (const binary_sensor in this._binary_sensors)
+        {
+            const previous_state = this._binary_sensors[binary_sensor].state;
+            for (const light_switch of this._binary_sensors[binary_sensor].light_switches)
             {
-                const info = await light_switch.getSysInfo();
-                const new_state = info.relay_state ? "on" : "off";
-
-                if (new_state != state)
+                try
                 {
-                    state = new_state;
-                    try
+                    const current_state = await this._requestSwitchState(light_switch);
+                    if (current_state != previous_state)
                     {
-                        await home_assistant("binary_sensor.study_lights", {state: state});
+                        this._binary_sensors[binary_sensor].state = current_state;
+                        this._updateSensorState(binary_sensor, current_state)
+                            .catch(console.log);
+                        break;
                     }
-                    catch (error)
-                    {
-                        console.log(error);
-                    }
-                    break;
+                }
+                catch (error)
+                {
+                    console.error(error);
                 }
             }
-        },
-        1000);
+        }
+    }
+
+    async _requestSwitchState(a_light_switch)
+    {
+        const info = await a_light_switch.getSysInfo();
+        return info.relay_state ? "on" : "off";
+    }
+
+    async _updateSensorState(a_sensor_name, a_new_state)
+    {
+        await this._home_assistant(`binary_sensor.${a_sensor_name}`,
+                                   {state: a_new_state});
+    }
+};
+
+
+async function run(a_home_assistant_url,
+                   a_home_assistant_token,
+                   a_switch_groups,
+                   a_interval_length)
+{
+    try
+    {
+        let watcher = new KasaWatcher(a_home_assistant_url,
+                                      a_home_assistant_token);
+
+        for (const binary_sensor in a_switch_groups)
+        {
+            const switch_group = a_switch_groups[binary_sensor];
+            await watcher.addSwitchGroup(binary_sensor,
+                                         switch_group.hosts,
+                                         switch_group.default_state);
+        }
+
+        setInterval(
+            async() => {
+                watcher.checkAllAndUpdate();
+            },
+            a_interval_length);
+    }
+    catch (error)
+    {
+        console.error(error);
+    }
 }
 
-run();
+run("http://192.168.1.2",
+    "",
+    {"study_lights": {hosts:["192.168.1.10",
+                             "192.168.1.11",
+                             "192.168.1.12"],
+                      default_state: "off"}},
+    1000);
