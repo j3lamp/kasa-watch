@@ -206,13 +206,14 @@ async function main(argv)
                  );
     const args = parsed_options.argv;
 
-    const ha_token = (await readFile(args["ha-token-file"])).trim();
-    if (!ha_token)
+    const raw_ha_token = await readFile(args["ha-token-file"]);
+    if (!raw_ha_token)
     {
-        console.error(`Could not read the Home Assistnat token file ` +
+        console.error(`Could not read the Home Assistant token file ` +
                       `"${args["ha-token-file"]}".`);
         process.exit(CANNOT_READ_TOKEN_FILE);
     }
+    const ha_token = raw_ha_token.trim();
 
     const raw_configuration = await readFile(args["configuration"]);
     if (!raw_configuration)
