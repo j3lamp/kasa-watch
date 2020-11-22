@@ -37,6 +37,7 @@ class KasaWatcher
                                     [200, 201]);
 
         this._binary_sensors = {};
+        this._host_connected = {};
     }
 
     /**
@@ -69,6 +70,10 @@ class KasaWatcher
         const new_state = (initial_states[a_default_initial_state] >= initial_states[other_state]
                            ? a_default_initial_state : other_state);
 
+        for (const host of a_hosts)
+        {
+            this._host_connected[host] = true;
+        }
         this._binary_sensors[a_binary_sensor_name] = {light_switches: new_light_switches,
                                                       state:          new_state};
 
@@ -84,6 +89,12 @@ class KasaWatcher
     _getOppositeState(light_switch_state)
     {
         return light_switch_state == "off" ? "on" : "off";
+    }
+
+    _log(a_message)
+    {
+        const now = new Date();
+        console.error(`${now.toISOString()}: ${a_message}`);
     }
 
     async _updateSensor(a_sensor_name)
@@ -111,13 +122,25 @@ class KasaWatcher
 
     async _tryRequestSwitchState(a_light_switch)
     {
+        const host                 = a_light_switch.host;
+        const previously_connected = this._host_connected[host];
         try
         {
-            return await this._requestSwitchState(a_light_switch);
+            const current_state = await this._requestSwitchState(a_light_switch);
+            this._host_connected[a_light_switch.host] = true;
+            if (!previously_connected)
+            {
+                this._log(`Reconnected to '${host}'.`);
+            }
+            return current_state;
         }
         catch
         {
-            console.error(`Could not connect to '${a_light_switch.host}'.`);
+            this._host_connected[a_light_switch.host] = false;
+            if (previously_connected)
+            {
+                this._log(`Could not connect to '${a_light_switch.host}'.`);
+            }
             return "disconnected";
         }
     }
