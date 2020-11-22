@@ -86,24 +86,21 @@ class KasaWatcher
         return light_switch_state == "off" ? "on" : "off";
     }
 
-    async _updateSensor(a_binary_sensor_name)
+    async _updateSensor(a_sensor_name)
     {
-        let  binary_sensor  = this._binary_sensors[a_binary_sensor_name];
+        let  binary_sensor  = this._binary_sensors[a_sensor_name];
         const light_switches = binary_sensor.light_switches;
-        const new_states = await Promise.all(light_switches.map(
-            (light_switch) => { return this._tryRequestSwitchState(light_switch); }));
-
         const change_state = this._getOppositeState(binary_sensor.state);
-        for (const new_state of new_states)
-        {
-            if (new_state == change_state)
-            {
-                binary_sensor.state = new_state;
-                await this._updateSensorState(a_binary_sensor_name, new_state)
-                    .catch(console.error);
-                break;
-            }
-        }
+
+        await Promise.all(light_switches.map(
+            async (light_switch) => {
+                const new_state = await this._tryRequestSwitchState(light_switch);
+                if (new_state == change_state)
+                {
+                    await this._updateSensorState(a_sensor_name, new_state)
+                        .catch(console.error);
+                }
+            }));
     }
 
     async _requestSwitchState(a_light_switch)
@@ -127,6 +124,12 @@ class KasaWatcher
 
     async _updateSensorState(a_sensor_name, a_new_state)
     {
+        if (a_new_state == this._binary_sensors[a_sensor_name].state)
+        {
+            return;
+        }
+
+        this._binary_sensors[a_sensor_name].state = a_new_state;
         await this._home_assistant(`binary_sensor.${a_sensor_name}`,
                                    {state: a_new_state});
     }
