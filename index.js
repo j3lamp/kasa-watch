@@ -8,12 +8,29 @@ const {Client} = require("tplink-smarthome-api");
 const yargs    = require("yargs/yargs");
 
 
+
+const NullLogger = {
+    debug(){},
+    info(){},
+    warn(){},
+    error(){}
+};
+
+
 class KasaWatcher
 {
     constructor(a_home_assistant_url,
-                a_home_assistant_token)
+                a_home_assistant_token,
+                a_kasa_timeout_ms,
+                a_quiet)
     {
-        this._kasa_client    = new Client();
+        let kasa_options = {defaultSendOptions: {timeout: a_kasa_timeout_ms}};
+        if (a_quiet)
+        {
+            kasa_options.logger = NullLogger;
+        }
+
+        this._kasa_client    = new Client(kasa_options);
         this._home_assistant = bent(`${a_home_assistant_url}/api/states/`,
                                     "POST",
                                     {Authorization: `Bearer ${a_home_assistant_token}`},
@@ -48,7 +65,7 @@ class KasaWatcher
                 const switch_state = await this._requestSwitchState(light_switch);
                 initial_states[switch_state] += 1;
             }));
-        const other_state = a_default_initial_state == "off" ? "on" : "off";
+        const other_state = this._getOppositeState(a_default_initial_state);
         const new_state = (initial_states[a_default_initial_state] >= initial_states[other_state]
                            ? a_default_initial_state : other_state);
 
@@ -60,26 +77,31 @@ class KasaWatcher
 
     async checkAllAndUpdate()
     {
-        for (const binary_sensor in this._binary_sensors)
+        await Promise.all(Object.keys(this._binary_sensors).map(
+            (binary_sensor) => { return this._updateSensor(binary_sensor); }));
+    }
+
+    _getOppositeState(light_switch_state)
+    {
+        return light_switch_state == "off" ? "on" : "off";
+    }
+
+    async _updateSensor(a_binary_sensor_name)
+    {
+        let  binary_sensor  = this._binary_sensors[a_binary_sensor_name];
+        const light_switches = binary_sensor.light_switches;
+        const new_states = await Promise.all(light_switches.map(
+            (light_switch) => { return this._tryRequestSwitchState(light_switch); }));
+
+        const change_state = this._getOppositeState(binary_sensor.state);
+        for (const new_state of new_states)
         {
-            const previous_state = this._binary_sensors[binary_sensor].state;
-            for (const light_switch of this._binary_sensors[binary_sensor].light_switches)
+            if (new_state == change_state)
             {
-                try
-                {
-                    const current_state = await this._requestSwitchState(light_switch);
-                    if (current_state != previous_state)
-                    {
-                        this._binary_sensors[binary_sensor].state = current_state;
-                        this._updateSensorState(binary_sensor, current_state)
-                            .catch(console.log);
-                        break;
-                    }
-                }
-                catch (error)
-                {
-                    console.error(error);
-                }
+                binary_sensor.state = new_state;
+                await this._updateSensorState(a_binary_sensor_name, new_state)
+                    .catch(console.error);
+                break;
             }
         }
     }
@@ -88,6 +110,19 @@ class KasaWatcher
     {
         const info = await a_light_switch.getSysInfo();
         return info.relay_state ? "on" : "off";
+    }
+
+    async _tryRequestSwitchState(a_light_switch)
+    {
+        try
+        {
+            return await this._requestSwitchState(a_light_switch);
+        }
+        catch
+        {
+            console.error(`Could not connect to '${a_light_switch.host}'.`);
+            return "disconnected";
+        }
     }
 
     async _updateSensorState(a_sensor_name, a_new_state)
@@ -100,13 +135,17 @@ class KasaWatcher
 
 async function run(a_home_assistant_url,
                    a_home_assistant_token,
+                   a_kasa_timeout_ms,
                    a_switch_groups,
-                   a_interval_length_ms)
+                   a_interval_length_ms,
+                   a_quiet)
 {
     try
     {
         let watcher = new KasaWatcher(a_home_assistant_url,
-                                      a_home_assistant_token);
+                                      a_home_assistant_token,
+                                      a_kasa_timeout_ms,
+                                      a_quiet);
 
         for (const binary_sensor in a_switch_groups)
         {
@@ -151,7 +190,7 @@ async function readFile(file_path, encoding="utf8")
 
 async function main(argv)
 {
-    const INVALID_CLI_ARGS           =  1
+    const INVALID_CLI_ARGS           =  1;
     const CANNOT_READ_TOKEN_FILE     =  2;
     const CANNOT_READ_CONFIG_FILE    =  3;
     const CANNOT_PARSE_CONFIG_FILE   =  4;
@@ -165,9 +204,17 @@ async function main(argv)
     const MISSING_BINARY_SENSORS     = 12;
     const EMPTY_BINARY_SENSORS       = 13;
     const INVALID_BINARY_SENSORS     = 14;
+    const NON_NUMERIC_KASA_TIMEOUT   = 15;
+    const NOT_POSITIVE_KASA_TIMEOUT  = 16;
 
     const parsed_options = yargs(argv)
           .options({
+              "verbose": {
+                  type:        "boolean",
+                  default:     false,
+                  alias:       "v",
+                  description: "Print more information when running."
+              },
               "ha-token-file": {
                   demandOption: true,
                   type:         "string",
@@ -202,7 +249,9 @@ async function main(argv)
                   `  Poll interval is not positive:        ${NOT_POSITIVE_POLL_INTERVAL}` + `\n` +
                   `  Configuration missing binary sensors: ${MISSING_BINARY_SENSORS}`     + `\n` +
                   `  Binary sensors object empty:          ${EMPTY_BINARY_SENSORS}`       + `\n` +
-                  `  Invalid binary sensors:               ${INVALID_BINARY_SENSORS}`     + `\n`
+                  `  Invalid binary sensors:               ${INVALID_BINARY_SENSORS}`     + `\n` +
+                  `  Non-numeric Kasa timeout:             ${NON_NUMERIC_KASA_TIMEOUT}`   + `\n` +
+                  `  Kasa timeout is not positive:         ${NOT_POSITIVE_KASA_TIMEOUT}`  + `\n`
                  );
     const args = parsed_options.argv;
 
@@ -365,10 +414,34 @@ async function main(argv)
     }
 
 
+    let kasa_timeout_ms = 10e3; // 10s, matching the tplink-smarthome-api default.
+    if (configuration["kasa_timeout_ms"] !== undefined)
+    {
+        if (typeof(configuration["kasa_timeout_ms"]) != "number" &&
+            !(configuration["kasa_timeout_ms"] instanceof Number))
+        {
+            console.error(`The configuration value for "kasa_timeout_ms" must ` +
+                          `be a positive number.`);
+            process.exit(NON_NUMERIC_KASA_TIMEOUT);
+        }
+        else if (configuration["kasa_timeout_ms"] <= 0)
+        {
+            console.error(`The configuration value for "kasa_timeout_ms" is ` +
+                          `less than or equal to zero, but must be a ` +
+                          `positive number.`);
+            process.exit(NOT_POSITIVE_KASA_TIMEOUT);
+        }
+
+        kasa_timeout_ms = configuration["kasa_timeout_ms"];
+    }
+
+
     run(configuration["home_assistant_url"],
         ha_token,
+        kasa_timeout_ms,
         configuration["binary_sensors"],
-        configuration["poll_interval_ms"]);
+        configuration["poll_interval_ms"],
+        !args["verbose"]);
 }
 
 main(process.argv);
