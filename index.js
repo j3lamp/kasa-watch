@@ -8,7 +8,12 @@ const {Client} = require("tplink-smarthome-api");
 const yargs    = require("yargs/yargs");
 
 
-
+/**
+ * A logger object that does nothing.
+ *
+ * This object is desinged to be used with the tplink-smarthome-api Client in
+ * situations when it's automatic logging isn't desired.
+ */
 const NullLogger = {
     debug(){},
     info(){},
@@ -17,8 +22,41 @@ const NullLogger = {
 };
 
 
+/**
+ * @typedef {string} SwitchState
+ *
+ * The state of a given switch. Must be one of "on", "off", or "disconnected".
+ *
+ * *Note:* The state "disconnected" should only be used when referring to the
+ *         state of an individual switch and shopuld not be used when referring
+ *         to the state of a group of switches.
+ */
+
+
+/**
+ * This does all the work for watching Kasa switches and updating their
+ * associated Home Assistant binary sensors.
+ */
 class KasaWatcher
 {
+    /**
+     * Create a KasaWatcher.
+     *
+     * While this creates a new KasaWatcher you will need to call
+     * {@link KasaWatcher#addSwitchGroup addSwitchGroup()} one or more times for
+     * this to do anything useful. As multiple groups can be added there is
+     * little reason to have more than one KasaWatch instance.
+     *
+     * @param {string} a_home_assistant_url
+     *     The URL to Home Assistant.
+     * @param {string} a_home_assistant_token
+     *     The Home Assistant long-lived access token.
+     * @param {number} a_kasa_timeout_ms
+     *     The timeout to use when polling the Kasa devices, in miliseconds.
+     * @param {bool} a_quiet
+     *     Whether to reduce logging output, `true` for reduced output and
+     *     `false` for regular verbose output.
+     */
     constructor(a_home_assistant_url,
                 a_home_assistant_token,
                 a_kasa_timeout_ms,
@@ -36,14 +74,41 @@ class KasaWatcher
                                     {Authorization: `Bearer ${a_home_assistant_token}`},
                                     [200, 201]);
 
+        /**
+         * The collection mapping binary sensor names to objects containing the
+         * array of switches and the current state.
+         * @member {Object}
+         */
         this._binary_sensors = {};
+
+        /**
+         * Whether or not a host is connected. A mapping from hostname to
+         * boolean values.
+         * @member {Object}
+         */
         this._host_connected = {};
     }
 
     /**
+     * Add a group of Kasa switches that will updat a single Home Assistant
+     * binary sensor when one of them changes state.
+     *
+     * All switches will be immediately polled for their current state. Whatever
+     * state the majority of the switches have will be used to set or update the
+     * Home Assitant binary sensor immediately. In the case of a tie the
+     * provided `a_default_initial_state` will be used.
+     *
+     * @param {string} a_binary_sensor_name
+     *     The name of the Home Assistant binary sensor that will be updated
+     *     whenever one of the switches state changes.
+     * @param {string[]} a_hosts
+     *     The host names or IP addresses of the Kasa switches to watch.
      * @param {string} a_default_initial_state
      *     This is used as a tie breaker if equal number of switches have
      *     opposite initial states. Must be "on" or "off".
+     *
+     * @throws Will trhow if unable to connect to one or more of the Kasa
+     *         switches or Home Assistant.
      */
     async addSwitchGroup(a_binary_sensor_name,
                          a_hosts,
@@ -80,28 +145,71 @@ class KasaWatcher
         await this._updateSensorState(a_binary_sensor_name, new_state);
     }
 
+    /**
+     * Check all switch groups and update their associated binary sensors.
+     *
+     * In parallel the state of every switch of every group is polled. If at
+     * least one switch of the group has changed state the binary sensor's state
+     * will be updated.
+     *
+     * *Note:* Unlike {@link KasaWatcher#addSwitchGroup addSwitchGroup()} this
+     *         does not throw if unable to contact any switches. However it does
+     *         log when connectivity is lost and recovered. If {@link KasaWatch}
+     *         is not constructed in quiet mode every failed request will print
+     *         out debug log information.
+     */
     async checkAllAndUpdate()
     {
         await Promise.all(Object.keys(this._binary_sensors).map(
             (binary_sensor) => { return this._updateSensor(binary_sensor); }));
     }
 
-    _getOppositeState(light_switch_state)
+    /**
+     * Boolean not for switch state strings.
+     *
+     * @param {string} a_light_switch_state
+     *     The original switch state for which the opposite is desired.
+     *
+     * @returns (string)  The state opposite of `a_light_switch_state`.
+     *
+     * @private
+     */
+    _getOppositeState(a_light_switch_state)
     {
-        return light_switch_state == "off" ? "on" : "off";
+        return a_light_switch_state == "off" ? "on" : "off";
     }
 
+    /**
+     * Log a message to the standard error output.
+     *
+     * Every message is preceeded by the current date and time in ISO format.
+     *
+     * @param {string} a_message  The message to log.
+     */
     _log(a_message)
     {
         const now = new Date();
         console.error(`${now.toISOString()}: ${a_message}`);
     }
 
+    /**
+     * Check the state of the associated switches and update the binary sensor
+     * if needed.
+     *
+     * This checks all of the switches states in parallel and updates the binary
+     * sensor's state when the first switch whose state has changed is
+     * encountered.
+     *
+     * @param {string} a_sensor_name
+     *     The name of the binary sensor to update, if needed.
+     *
+     * @private
+     */
     async _updateSensor(a_sensor_name)
     {
-        let  binary_sensor  = this._binary_sensors[a_sensor_name];
+        let   binary_sensor  = this._binary_sensors[a_sensor_name];
         const light_switches = binary_sensor.light_switches;
-        const change_state = this._getOppositeState(binary_sensor.state);
+        const change_state   = this._getOppositeState(binary_sensor.state);
 
         await Promise.all(light_switches.map(
             async (light_switch) => {
@@ -114,12 +222,32 @@ class KasaWatcher
             }));
     }
 
+    /**
+     * Get the current state of a Kasa switch.
+     *
+     * @returns {string}  The switch's current state: "on" or "off".
+     *
+     * @throws Will throw if unable to connect to the Kasa switch.
+     *
+     * @private
+     */
     async _requestSwitchState(a_light_switch)
     {
         const info = await a_light_switch.getSysInfo();
         return info.relay_state ? "on" : "off";
     }
 
+    /**
+     * Get the current state of a Kasa switch.
+     *
+     * This is a no-throw version of
+     * {@link KasaWatch#_requestSwitchState _requestSwitchState()}.
+     *
+     * @returns {string} The switches current state: "on", "off", or
+     * "disconnected" if unable to connect to the switch.
+     *
+     * @private
+     */
     async _tryRequestSwitchState(a_light_switch)
     {
         const host                 = a_light_switch.host;
@@ -145,6 +273,19 @@ class KasaWatcher
         }
     }
 
+    /**
+     * Set or update the state of the Home Assistant binary sensor.
+     *
+     * *Note:* If the `a_new_state` is the same as the last state set for the
+     *         binary sensor nothing will be done.
+     *
+     * @param {string} a_sensor_name
+     *     The name of the Home Assistnat binary sensor to set or update.
+     * @param {string} a_new_state
+     *     The new state to set for the binary sensor.
+     *
+     * @throws This will throw if unable to connect to Home Assistant.
+     */
     async _updateSensorState(a_sensor_name, a_new_state)
     {
         if (a_new_state == this._binary_sensors[a_sensor_name].state)
@@ -159,6 +300,48 @@ class KasaWatcher
 };
 
 
+/**
+ * @typedef {Object} SwitchGroup
+ *
+ * An object that represents a group of Kasa switches that should be treated as
+ * a single unit.
+ *
+ * @property {SwitchState} default_state
+ *     The default state to use if there are an equal number of switches in
+ *     opposing states at startup.
+ * @property {string[]} hosts
+ *     The hostnames or IP addresses of the swtiches in the group.
+ */
+
+/**
+ * @typedef {Object} SwitchGroups
+ *
+ * An object that maps each Home Assistant binary sensor name to a
+ * {@link SwitchGroup} of Kasa switches.
+ */
+
+
+/**
+ * Actually run kasa-watch.
+ *
+ * This function sets up the watcher and handles the polling interval.
+ *
+ * @param {string} a_home_assistant_url
+ *     The URL to Home Assistant.
+ * @param {string} a_home_assistant_token
+ *     The Home Assistant long-lived access token.
+ * @param {number} a_kasa_timeout_ms
+ *     The timeout to use when polling the Kasa devices, in miliseconds.
+ * @param {SwitchGroups} a_switch_groups
+ *     The groups of Kasa switches to poll and their associated Home Assistant
+ *     binary sensor names.
+ * @param {number} a_interval_length_ms
+ *     The interval at which to poll the state of the Kasa devices, in
+ *     miliseconds.
+ * @param {bool} a_quiet
+ *     Whether to reduce logging output, `true` for reduced output and `false`
+ *     for regular verbose output.
+ */
 async function run(a_home_assistant_url,
                    a_home_assistant_token,
                    a_kasa_timeout_ms,
@@ -193,13 +376,23 @@ async function run(a_home_assistant_url,
     }
 }
 
-async function readFile(file_path, encoding="utf8")
+/**
+ * Read the contents of a file directly.
+ *
+ * @param {string} a_file_path  The path, on disk, to the file to be read.
+ * @param {string} a_encoding   The encoding to use when reading the file.
+ *
+ * @returns {string|Buffer}
+ *     The contents of the file as a string if appropriate for the encoding
+ *     used otherwise as a Buffer.
+ */
+async function readFile(a_file_path, a_encoding="utf8")
 {
     let file = null;
     try
     {
-        file = await fs.open(file_path, 'r')
-        return await file.readFile({encoding: encoding});
+        file = await fs.open(a_file_path, 'r')
+        return await file.readFile({encoding: a_encoding});
     }
     catch (error)
     {
@@ -214,6 +407,14 @@ async function readFile(file_path, encoding="utf8")
     }
 }
 
+/**
+ * The main function which handles starting kasa-watch.
+ *
+ * This handles the command-line arguments as well as validating the
+ * configuration file.
+ *
+ * @param {string[]} argv  The command line aguments.
+ */
 async function main(argv)
 {
     const INVALID_CLI_ARGS           =  1;
@@ -246,7 +447,7 @@ async function main(argv)
                   type:         "string",
                   description:
                   ("The path to the file containing the Home Assistant (HA) " +
-                   "long-lived access token")
+                   "long-lived access token.")
               },
               "configuration": {
                   alias:        "config",

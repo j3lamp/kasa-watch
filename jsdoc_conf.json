@@ -1,0 +1,23 @@
+{
+    "plugins": [
+        "plugins/markdown"
+    ],
+
+    "source": {
+        "include": [
+            "index.js"
+        ]
+    },
+
+    "tags": {
+        "allowUnknownTags": false
+    },
+
+    "opts": {
+        "recurse":     true,
+        "readme":      "README.md",
+        "access":      "all",
+        "destination": "dist/docs",
+        "template":    "node_modules/docdash"
+    }
+}
