@@ -1,3 +1,6 @@
+# Be sure to specify a value for the dockerReporitory variable when running
+# make.
+
 OUT := @
 ifdef VERBOSE
   OUT :=
@@ -22,9 +25,10 @@ runColor      := green
 otherColor    := magenta
 
 
-arch       := $(shell uname -m)
-version    := $(shell git describe --dirty --match "version/*" | sed -e 's|^version/||')
-dockerName := docker.lamp/kasa-watch:$(version)_$(arch)
+arch             := $(shell uname -m)
+version          := $(shell git describe --dirty --match "version/*" | sed -e 's|^version/||')
+dockerRepository :=
+dockerName       := $(dockerRepository)/kasa-watch:$(version)_$(arch)
 
 .PHONY: all
 all: docker

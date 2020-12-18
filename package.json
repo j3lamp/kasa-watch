@@ -5,12 +5,15 @@
   "repository": "https://github.com/j3lamp/kasa-watch",
   "main": "index.js",
   "scripts": {
+    "doc": "jsdoc --configure jsdoc_conf.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
   "license": "MIT",
   "dependencies": {
     "bent": "7.3.12",
+    "docdash": "1.2.0",
+    "jsdoc": "3.6.6",
     "tplink-smarthome-api": "3.1.0",
     "yargs": "16.1.1"
   }
